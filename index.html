@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Image Scanner AR ➜ Putar Video</title>
+  <!-- MindAR (Image Tracking) -->
+  <script src="https://cdn.jsdelivr.net/npm/three@0.158.0/build/three.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/mind-ar@1.2.5/dist/mindar-image-three.prod.js"></script>
+  <style>
+    html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; background:#000; font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;}
+    #ar-container { width: 100vw; height: 100vh; position: fixed; inset: 0; background:#000; }
+    .ui { position: fixed; left: 0; right: 0; bottom: 0; padding: 14px 16px; display: flex; gap: 10px; align-items: center; justify-content: space-between; pointer-events: none; }
+    .ui > * { pointer-events: auto; }
+    .pill { background: rgba(0,0,0,.55); color: #fff; padding: 10px 14px; border-radius: 999px; font-size: 14px; display: inline-flex; align-items: center; gap: 8px; }
+    button { border: 0; border-radius: 999px; padding: 10px 14px; background: #ffffff; font-weight: 600; }
+    #hint { position: fixed; top: 12px; left: 50%; transform: translateX(-50%); background: rgba(0,0,0,.55); color: #fff; padding: 10px 14px; border-radius: 10px; font-size: 14px; }
+    #start-overlay { position: fixed; inset: 0; display: grid; place-items: center; background: #000; color:#fff; }
+    #start-overlay.hidden { display:none; }
+    .badge { font-size: 12px; opacity:.8; }
+    a { color:#fff; }
+  </style>
+</head>
+<body>
+  <!-- Overlay awal untuk iOS/Android agar kamera bisa diaktifkan dengan gesture -->
+  <div id="start-overlay">
+    <div style="text-align:center; max-width: 520px; padding:24px">
+      <h1 style="margin:0 0 8px">Image Scanner AR</h1>
+      <p style="margin:0 0 18px; opacity:.9">Arahkan kamera ke <b>sampul buku</b> (gambar target). Saat terdeteksi, video akan muncul di atas gambar secara Augmented Reality.</p>
+      <button id="start-btn">Mulai Kamera</button>
+      <div class="badge" style="margin-top:12px">Pastikan memberi izin kamera (HTTPS) • Sentuh untuk unmute suara</div>
+    </div>
+  </div>
+
+  <div id="hint">▶️ Arahkan kamera ke gambar target (sampul buku)</div>
+
+  <div id="ar-container"></div>
+
+  <!-- Video yang akan diproyeksikan ke atas gambar target -->
+  <video id="ar-video" playsinline webkit-playsinline muted loop preload="auto" style="display:none;">
+    <!-- Ganti URL video di bawah sesuai kebutuhan Anda -->
+    <source src="https://interactive-examples.mdn.mozilla.net/media/cc0-videos/flower.mp4" type="video/mp4" />
+  </video>
+
+  <div class="ui">
+    <div class="pill">🔊 Suara: <span id="sound-state">Off</span></div>
+    <div style="display:flex; gap:10px;">
+      <button id="toggle-sound">Toggle Suara</button>
+      <button id="pause-play">Jeda</button>
+    </div>
+  </div>
+
+  <script>
+    // ======== Konfigurasi dasar ========
+    // Ganti dengan target .mind Anda sendiri yang dibuat dari MindAR Studio (gambar sampul buku):
+    // Cara cepat: https://hiukim.github.io/mind-ar-js-doc/tools/compile/
+    const TARGET_SRC = "targets.mind";
+
+    // Lebar bidang video (meter). Sesuaikan agar seukuran sampul di dunia nyata.
+    const PLANE_WIDTH = 1.0; // 1 meter
+
+    const arContainer = document.getElementById('ar-container');
+    const startOverlay = document.getElementById('start-overlay');
+    const startBtn = document.getElementById('start-btn');
+    const vid = document.getElementById('ar-video');
+    const soundState = document.getElementById('sound-state');
+    const toggleSoundBtn = document.getElementById('toggle-sound');
+    const pausePlayBtn = document.getElementById('pause-play');
+
+    let mindarThree, renderer, scene, camera, anchor, videoTexture, plane;
+
+    async function initAR() {
+      mindarThree = new window.MINDAR.IMAGE.MindARThree({
+        container: arContainer,
+        imageTargetSrc: TARGET_SRC,
+        // kamera belakang
+        filterMinCF: 0.0001,
+        filterBeta: 0.01,
+        uiScanning: false,
+        uiLoading: 'no',
+      });
+
+      const {renderer: _renderer, scene: _scene, camera: _camera} = mindarThree;
+      renderer = _renderer; scene = _scene; camera = _camera;
+
+      const light = new THREE.HemisphereLight(0xffffff, 0x222233, 1.2);
+      scene.add(light);
+
+      // Anchor untuk target index 0 pada file .mind
+      anchor = mindarThree.addAnchor(0);
+
+      // Buat plane sebagai kanvas video
+      videoTexture = new THREE.VideoTexture(vid);
+      videoTexture.needsUpdate = true;
+
+      const material = new THREE.MeshBasicMaterial({ map: videoTexture, side: THREE.DoubleSide, toneMapped: false});
+
+      // Rasio bidang video agar tidak ketarik: tinggi mengikuti rasio video saat metadata siap
+      let planeHeight = PLANE_WIDTH * 9/16; // default 16:9
+      vid.addEventListener('loadedmetadata', () => {
+        const ar = vid.videoHeight / vid.videoWidth;
+        planeHeight = PLANE_WIDTH * ar;
+        if (plane) plane.scale.set(1, ar, 1); // skala Y agar rasio benar
+      });
+
+      const geometry = new THREE.PlaneGeometry(PLANE_WIDTH, planeHeight);
+      plane = new THREE.Mesh(geometry, material);
+      plane.position.set(0, 0, 0);
+      plane.rotation.set(0, 0, 0);
+      anchor.group.add(plane);
+
+      // Event: saat target ditemukan atau hilang
+      anchor.onTargetFound = async () => {
+        try { await vid.play(); } catch(e) { /* Autoplay bisa butuh gesture */ }
+      };
+      anchor.onTargetLost = () => {
+        vid.pause();
+      };
+
+      // Render loop
+      const clock = new THREE.Clock();
+      await mindarThree.start();
+      renderer.setAnimationLoop(() => {
+        const t = clock.getElapsedTime();
+        // efek subtle: kedipkan brightness material setiap 6s
+        material.needsUpdate = true;
+        renderer.render(scene, camera);
+      });
+    }
+
+    // ======== UI Controls ========
+    toggleSoundBtn.addEventListener('click', () => {
+      vid.muted = !vid.muted;
+      soundState.textContent = vid.muted ? 'Off' : 'On';
+      if (!vid.paused) vid.play().catch(()=>{});
+    });
+
+    pausePlayBtn.addEventListener('click', () => {
+      if (vid.paused) {
+        vid.play().catch(()=>{});
+        pausePlayBtn.textContent = 'Jeda';
+      } else {
+        vid.pause();
+        pausePlayBtn.textContent = 'Putar';
+      }
+    });
+
+    startBtn.addEventListener('click', async () => {
+      startOverlay.classList.add('hidden');
+      try { await initAR(); } catch (e) {
+        alert('Gagal memulai AR: ' + e.message + '\n\nPastikan situs via HTTPS dan izinkan akses kamera.');
+        console.error(e);
+      }
+    });
+
+    // Perlihatkan status suara awal
+    soundState.textContent = vid.muted ? 'Off' : 'On';
+  </script>
+</body>
+</html>
